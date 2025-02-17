@@ -1,9 +1,10 @@
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from typing_extensions import Annotated
 from pydantic import BaseModel
-
+from database import create_db_and_tables, engine
 
 app = FastAPI()
 
@@ -66,6 +67,16 @@ async def get_current_active_user(current_user: Annotated[User, Depends(get_curr
     if current_user.disabled:
         raise HTTPException(status_code=400, detail="User Disabled")
     return current_user
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # on start-up
+    create_db_and_tables()
+    yield
+    # on shut-down
+    engine.dispose()
+    print("Closing app")
 
 @app.post("/token")
 async def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()]):
