@@ -92,6 +92,8 @@ def get_session():
     with Session(engine) as session:
         yield session
 
+
+
 SQLModel.metadata.create_all(engine)
 
 Session_Dep = Annotated[Session, Depends(get_session)]
