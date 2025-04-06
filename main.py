@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
 from datetime import timedelta
 
+from certifi import where
 from pydantic import BaseModel
+from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse
 
 from utils import add_image_to_fs
@@ -31,9 +33,26 @@ class StudentScheme(BaseModel):
 
 # random file to make a default
 
+# CROS settings
+
+origins = [
+    "http://127.0.0.1:3000",  # If your Electron app runs on a local server
+    "http://localhost:5173",
+    "http://127.0.0.1:8000",  # Allow API itself (if making internal requests)
+    "file://",  # Electron apps might run from file://
+]
+
+
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allow specific origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
 
 
 
@@ -72,7 +91,8 @@ def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], db: Sessio
 @app.get("/")
 def root(db: Session = Depends(get_session)):
     users = db.query(Users).all()
-    return {"Hello": "world", "users": users}
+    print(users)
+    return {"user": users}
 
 @app.post("/register")
 async def register(user: User, db: Session = Depends(get_session)):
@@ -85,11 +105,29 @@ async def register(user: User, db: Session = Depends(get_session)):
     print(f"User: {created_user.username} created successfully")
     return created_user
 
+# request form
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 @app.post("/login")
-def login(form_data: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session = Depends(get_session)):
-    isAuthed = authenticate_user(form_data.username, form_data.password, db)
-    print(f"Is authed: {isAuthed}")
-    return {"username": form_data.username, "password": form_data.password}
+def login(form_data: LoginRequest, db: Session = Depends(get_session)):
+    print("you're trying (and probably falling) to login")
+    isAuthenticated = authenticate_user(form_data.username, form_data.password, db)
+    print(f"Is authenticated: {isAuthenticated}")
+    if not isAuthenticated:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    else:
+        print(f"User: {form_data.username} logged in successfully")
+
+        access_token = create_access_token(data={"sub": form_data.username}, expires_delta=timedelta(minutes=15))
+        return {"access_token": access_token, "token_type": "bearer"}
 
 
 @app.get("/users/me")
@@ -115,7 +153,6 @@ async def get_all_classes(db: Session = Depends(get_session)):
     return classes
 
 @app.get("/classes/{class_id}")
-@app.get("/classes/{class_id}")
 async def view_class(class_id: int, db: Session = Depends(get_session)):
     print(f"Class ID: {class_id}")
 
@@ -137,8 +174,25 @@ async def view_class(class_id: int, db: Session = Depends(get_session)):
 
     return data
 
-# get students
+# delete classes
+@app.delete("/classes/delete/{class_id}")
+async def delete_class(class_id: int, db: Session = Depends(get_session)):
+    # Fetch the class by ID
+    target_class = db.query(Classes).filter(Classes.id == class_id).first()
+    print(target_class)
+    if not target_class:
+        raise HTTPException(status_code=404, detail="Class not found")
 
+    # Optional: delete students associated with this class
+    db.query(Students).filter(Students.class_id == class_id).delete()
+
+    # Delete the class
+    db.delete(target_class)
+    db.commit()
+
+    return {"status": "success", "message": f"Class with ID {class_id} has been deleted"}
+
+# get students
 @app.get("/students/all")
 def get_all_students(db: Session = Depends(get_session)):
     return db.query(Students).all()
@@ -180,3 +234,36 @@ def add_student(student_info: StudentScheme, db: Session = Depends(get_session),
         print(f"Student: {new_student.name} created successfully")
         return RedirectResponse(url="/classes/{}".format(class_id))
 
+from fastapi import File, Form, UploadFile
+
+@app.post("/students/upload")
+async def upload_student(
+    name: str = Form(...),
+    group: str = Form(...),
+    college: str = Form("information technology"),
+    department: str = Form("software engineering"),
+    year: int = Form(...),
+    class_id: int = Form(...),
+    image: UploadFile = File(None),
+    db: Session = Depends(get_session)
+):
+    print(f"Received student: {name}")
+
+    image_path = "storage/images/default.jpg"
+    if image:
+        image_path = add_image_to_fs(image)
+
+    new_student = Students(
+        name=name,
+        group=group,
+        college=college,
+        department=department,
+        year=year,
+        class_id=class_id,
+        Image_URI=image_path,
+    )
+    db.add(new_student)
+    db.commit()
+    db.refresh(new_student)
+
+    return {"status": "success", "student_id": new_student.id}
