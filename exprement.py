@@ -1,75 +1,44 @@
-from typing import Annotated
+import cv2
+import matplotlib.pyplot as plt
+from deepface import DeepFace
+from scipy.spatial.distance import cosine
 
-from fastapi import Depends, FastAPI, HTTPException, Query
-from sqlmodel import Field, Session, SQLModel, create_engine, select
+# === Load two face images (change paths to your images) ===
+img1_path = "storage/images/bfc52597dec5.jpg"
+img2_path = "temp/moe_2.jpg"
 
+# === Display the images side by side ===
+img1 = cv2.imread(img1_path)
+img2 = cv2.imread(img2_path)
 
-class Hero(SQLModel, table=True):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
-    age: int | None = Field(default=None, index=True)
-    secret_name: str
+# Convert from BGR to RGB for display
+img1_rgb = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB)
+img2_rgb = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB)
 
+face_detected = DeepFace.extract_faces(img_path=img2_path)
+face = face_detected[0]["face"]
+plt.figure(figsize=(10, 5))
+plt.subplot(1, 2, 1)
+plt.imshow(img1_rgb)
+plt.title("Image 1")
+plt.axis('off')
 
-sqlite_file_name = "database.db"
-sqlite_url = f"sqlite:///{sqlite_file_name}"
+plt.subplot(1, 2, 2)
+plt.imshow(face)
+plt.title("Image 2")
+plt.axis('off')
+plt.show()
 
-connect_args = {"check_same_thread": False}
-engine = create_engine(sqlite_url, connect_args=connect_args, echo=True)
+# === Get Embeddings from DeepFace ===
+embedding1 = DeepFace.represent(img1_path, model_name="Facenet", enforce_detection=True)[0]["embedding"]
+embedding2 = DeepFace.represent(face, model_name="Facenet", enforce_detection=True)[0]["embedding"]
 
+# === Compute cosine distance ===
+distance = cosine(embedding1, embedding2)
 
-def create_db_and_tables():
-    SQLModel.metadata.create_all(engine)
-
-
-def get_session():
-    print("currently in session")
-    with Session(engine) as session:
-        yield session
-
-
-SessionDep = Annotated[Session, Depends(get_session)]
-
-app = FastAPI()
-
-
-@app.on_event("startup")
-def on_startup():
-    create_db_and_tables()
-
-
-@app.post("/heroes/")
-def create_hero(hero: Hero, session: SessionDep) -> Hero:
-    print(hero)
-    session.add(hero)
-    session.commit()
-    session.refresh(hero)
-    return hero
-
-
-@app.get("/heroes/")
-def read_heroes(
-    session: SessionDep,
-    offset: int = 0,
-    limit: Annotated[int, Query(le=100)] = 100,
-) -> list[Hero]:
-    heroes = session.exec(select(Hero).offset(offset).limit(limit)).all()
-    return heroes
-
-
-@app.get("/heroes/{hero_id}")
-def read_hero(hero_id: int, session: SessionDep) -> Hero:
-    hero = session.get(Hero, hero_id)
-    if not hero:
-        raise HTTPException(status_code=404, detail="Hero not found")
-    return hero
-
-
-@app.delete("/heroes/{hero_id}")
-def delete_hero(hero_id: int, session: SessionDep):
-    hero = session.get(Hero, hero_id)
-    if not hero:
-        raise HTTPException(status_code=404, detail="Hero not found")
-    session.delete(hero)
-    session.commit()
-    return {"ok": True}
+# === Print result ===
+print(f"🧠 Cosine distance between the faces: {distance:.4f}")
+if distance < 0.4:
+    print("✅ Likely the same person")
+else:
+    print("❌ Likely different people")

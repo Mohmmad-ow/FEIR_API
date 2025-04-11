@@ -1,21 +1,33 @@
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from typing import List
 
-from certifi import where
 from pydantic import BaseModel
 from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import RedirectResponse
 
 from utils import add_image_to_fs
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile
+from fastapi import FastAPI,  HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 from typing_extensions import Annotated
 from database import create_db_and_tables, engine, get_session, Users, Classes, Students
 from encryption import oauth2_scheme, authenticate_user, create_access_token, User, get_password_hash
 from middleware import get_user_by_token
-# from types import ClassesScheme, StudentScheme
+from fastapi.staticfiles import StaticFiles
+
+
+
+
+# AI related imports
+import cv2
+from fastapi import Depends
+from sqlalchemy.orm import Session
+from deepface import DeepFace
+import numpy as np
+import os
+from scipy.spatial.distance import cosine
+
 class ClassesScheme(BaseModel):
     name: str
     college: str = "information technology"
@@ -55,6 +67,8 @@ app.add_middleware(
 )
 
 
+
+app.mount("/images", StaticFiles(directory="storage/images"), name="images")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -152,6 +166,45 @@ async def get_all_classes(db: Session = Depends(get_session)):
     classes = db.query(Classes).all()
     return classes
 
+
+
+
+
+@app.get("/classes-students/all")
+async def view_class(db: Session = Depends(get_session)):
+    statement = (
+        select(Students, Classes)
+        .join(Classes, Students.class_id == Classes.id)
+    )
+    results = db.execute(statement).all()
+
+    # Group students by class
+    class_map = {}
+    for student, class_ in results:
+        class_id = class_.id
+        student_dict = {
+            **student.__dict__,
+            "image_url": f"http://localhost:8000/images/{os.path.basename(student.Image_URI)}"
+        }
+
+        if class_id not in class_map:
+            class_map[class_id] = {
+                "class": class_.__dict__,
+                "students": []
+            }
+
+        class_map[class_id]["students"].append(student_dict)
+
+    # Remove SQLAlchemy state from class dicts
+    for entry in class_map.values():
+        entry["class"].pop("_sa_instance_state", None)
+        for student in entry["students"]:
+            student.pop("_sa_instance_state", None)
+
+    return list(class_map.values())
+
+
+
 @app.get("/classes/{class_id}")
 async def view_class(class_id: int, db: Session = Depends(get_session)):
     print(f"Class ID: {class_id}")
@@ -166,13 +219,17 @@ async def view_class(class_id: int, db: Session = Depends(get_session)):
     # Convert results into dictionaries
     data = [
         {
-            "student": student.__dict__,
+            "student": {
+                **student.__dict__,
+                "image_url": f"http://localhost:8000/images/{os.path.basename(student.Image_URI)}"
+            },
             "class": class_.__dict__
         }
         for student, class_ in result
     ]
 
     return data
+
 
 # delete classes
 @app.delete("/classes/delete/{class_id}")
@@ -191,6 +248,38 @@ async def delete_class(class_id: int, db: Session = Depends(get_session)):
     db.commit()
 
     return {"status": "success", "message": f"Class with ID {class_id} has been deleted"}
+
+
+# edit class name
+@app.put("/classes/edit/{class_id}")
+def edit_class(class_info: ClassesScheme, class_id: int, db: Session = Depends(get_session)):
+    # Fetch the class by ID
+    target_class = db.query(Classes).filter(Classes.id == class_id).first()
+    print(target_class)
+    if not target_class:
+        raise HTTPException(status_code=404, detail="Class not found")
+
+    # ✅ Update fields
+    target_class.name = class_info.name
+    target_class.college = class_info.college
+    target_class.department = class_info.department
+    target_class.year = class_info.year
+
+    # ✅ Commit changes
+    db.commit()
+    db.refresh(target_class)
+
+    return {
+        "status": "success",
+        "message": f"Class with ID {class_id} updated successfully",
+        "updated_class": {
+            "id": target_class.id,
+            "name": target_class.name,
+            "college": target_class.college,
+            "department": target_class.department,
+            "year": target_class.year
+        }
+    }
 
 # get students
 @app.get("/students/all")
@@ -234,7 +323,10 @@ def add_student(student_info: StudentScheme, db: Session = Depends(get_session),
         print(f"Student: {new_student.name} created successfully")
         return RedirectResponse(url="/classes/{}".format(class_id))
 
-from fastapi import File, Form, UploadFile
+
+import uuid
+from fastapi import Form, File, UploadFile, Depends
+from sqlalchemy.orm import Session
 
 @app.post("/students/upload")
 async def upload_student(
@@ -248,11 +340,50 @@ async def upload_student(
     db: Session = Depends(get_session)
 ):
     print(f"Received student: {name}")
-
     image_path = "storage/images/default.jpg"
-    if image:
-        image_path = add_image_to_fs(image)
 
+    if image:
+        try:
+            # Step 1: Read uploaded image into NumPy array (BGR)
+            img_bytes = await image.read()
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            bgr_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+
+            # Step 2: Convert to RGB for DeepFace
+            rgb_img = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2RGB)
+
+            # Step 3: Extract faces using DeepFace
+            faces = DeepFace.extract_faces(
+                rgb_img,
+                detector_backend="opencv",  # or 'opencv', 'mtcnn', etc.
+                enforce_detection=True
+            )
+
+            if not faces:
+                raise Exception("No face detected.")
+
+            # Step 4: Convert and save the first detected face
+            face_rgb = faces[0]["face"]
+
+            # 🧠 Normalize to 0–255 if it's in 0–1 range
+            if face_rgb.max() <= 1.0:
+                face_rgb *= 255.0
+
+            face_rgb_uint8 = face_rgb.astype(np.uint8)
+            face_bgr = cv2.cvtColor(face_rgb_uint8, cv2.COLOR_RGB2BGR)
+
+            os.makedirs("storage/images", exist_ok=True)
+            filename = f"{uuid.uuid4().hex[:12]}.jpg"
+            face_path = os.path.join("storage/images", filename)
+            cv2.imwrite(face_path, face_rgb)
+
+            image_path = face_path
+
+        except Exception as e:
+            print(f"⚠️ Face extraction failed: {e}")
+            image_path = "storage/images/default.jpg"
+
+    # Step 5: Save to DB
     new_student = Students(
         name=name,
         group=group,
@@ -266,4 +397,158 @@ async def upload_student(
     db.commit()
     db.refresh(new_student)
 
-    return {"status": "success", "student_id": new_student.id}
+    return {
+        "status": "success",
+        "student_id": new_student.id,
+        "face_image": image_path
+    }
+
+
+class DeleteStudentsRequest(BaseModel):
+    students: List[int]
+
+@app.delete("/students/delete")
+async def delete_students(
+
+    payload: DeleteStudentsRequest,
+    db: Session = Depends(get_session)
+):
+    deleted_students = []
+
+    for student_id in payload.students:
+        student = db.query(Students).filter(
+            Students.id == student_id
+        ).first()
+        print(f'found student: {student}')
+        if not student:
+            continue
+
+        # Delete image if exists
+        if student.Image_URI and os.path.exists(student.Image_URI):
+            try:
+                os.remove(student.Image_URI)
+            except Exception as e:
+                print(f"Error deleting image for student {student.name}: {e}")
+        else:
+            print(f"couldn't find this image: {student.Image_URI}")
+        db.delete(student)
+        deleted_students.append(student.name)
+
+    db.commit()
+
+    return {
+        "message": f"{len(deleted_students)} student(s) deleted.",
+        "deleted": deleted_students
+    }
+
+def embed_face_into_canvas(face, canvas_size=(160, 160)):
+    # Make sure face is uint8
+    if face.max() <= 1.0:
+        face = (face * 255).astype(np.uint8)
+    else:
+        face = face.astype(np.uint8)
+
+    canvas = np.zeros((canvas_size[0], canvas_size[1], 3), dtype=np.uint8)
+
+    # Resize face to fit canvas
+    face_resized = cv2.resize(face, (canvas_size[1], canvas_size[0]))
+
+    # Place the resized face in canvas
+    canvas[:canvas_size[0], :canvas_size[1]] = face_resized
+
+    return canvas
+
+
+@app.post("/attendance/recognize")
+async def recognize_students(
+    class_id: int = Form(...),
+    classroom_image: UploadFile = File(...),
+    db: Session = Depends(get_session)
+):
+    # Save uploaded classroom image
+    os.makedirs("temp", exist_ok=True)
+    classroom_img_path = f"temp/classroom_{class_id}.jpg"
+    with open(classroom_img_path, "wb") as f:
+        f.write(await classroom_image.read())
+
+    # Fetch student images from DB
+    students = db.query(Students).filter(Students.class_id == class_id).all()
+    student_faces = []
+    for s in students:
+        image_path = s.Image_URI
+        if not os.path.isabs(image_path):
+            image_path = os.path.join("storage/images", image_path) if not image_path.startswith("storage/") else image_path
+        if os.path.exists(image_path):
+            student_faces.append({"id": s.id, "name": s.name, "img": image_path})
+
+    if not student_faces:
+        return {"error": "No valid student images found."}
+
+    # Detect faces from classroom image
+    try:
+        detected_faces = DeepFace.extract_faces(
+            classroom_img_path,
+            detector_backend="opencv",
+            enforce_detection=False
+        )
+    except Exception as e:
+        return {"error": f"Failed to extract faces: {str(e)}"}
+
+    if not detected_faces:
+        return {"error": "No faces detected in classroom image."}
+
+    print(f"🔍 Detected {len(detected_faces)} face(s) in classroom image.")
+
+    present_students = set()
+    threshold = 0.5  # Tune this
+
+    for i, face_data in enumerate(detected_faces):
+        face_img = face_data["face"]
+
+        try:
+            face_img = embed_face_into_canvas(face_img)
+            embedding1 = DeepFace.represent(
+                face_img,
+                model_name="Facenet512",  # <- more accurate
+                enforce_detection=False
+            )[0]["embedding"]
+        except Exception as e:
+            print(f"❌ Could not get embedding for face #{i}: {e}")
+            continue
+
+        for student in student_faces:
+            try:
+                embedding2 = DeepFace.represent(
+                    img_path=student["img"],
+                    model_name="Facenet512",
+                    enforce_detection=True
+                )[0]["embedding"]
+                distance = cosine(embedding1, embedding2)
+                print(f"Distance to {student['name']}: {distance:.4f}")
+
+                if distance < threshold:
+                    print(f"✅ Matched with {student['name']} (ID: {student['id']})")
+                    present_students.add(student["id"])
+                    break
+
+            except Exception as e:
+                print(f"⚠️ Error with {student['name']}: {e}")
+                continue
+
+    # Split present and absent
+    present_list = [s for s in student_faces if s["id"] in present_students]
+    absent_list = [s for s in student_faces if s["id"] not in present_students]
+
+    # Cleanup
+    if os.path.exists(classroom_img_path):
+        os.remove(classroom_img_path)
+
+    results = {
+        "present": present_list,
+        "absent": absent_list,
+        "total_detected_faces": len(detected_faces),
+        "total_students": len(student_faces),
+        "matched_count": len(present_list)
+    }
+
+    return results

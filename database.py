@@ -35,7 +35,7 @@ class Students(SQLModel, table=True):
     college: Optional[str] = Field(default="Information Technology", nullable=True)
     department: Optional[str] = Field(default="Software", nullable=True)
     year: Optional[int] = Field(default=1, nullable=False)
-    Image_URI: str = Field(nullable=False, unique=True)
+    Image_URI: str = Field(nullable=False)
 
     # Foreign Key
     class_id: Optional[int] = Field(foreign_key="classes.id", nullable=False)
