@@ -9,6 +9,7 @@ dist
 site
 storage
 images
+temp
 .coverage*
 coverage.xml
 .netlify

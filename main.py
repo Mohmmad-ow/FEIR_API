@@ -1,17 +1,18 @@
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from typing import List
+from typing import List, Any
 
 from pydantic import BaseModel
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.middleware.cors import CORSMiddleware
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, JSONResponse
 
 from utils import add_image_to_fs
-from fastapi import FastAPI,  HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Body
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import select
 from typing_extensions import Annotated
-from database import create_db_and_tables, engine, get_session, Users, Classes, Students
+from database import create_db_and_tables, engine, get_session, Users, Classes, Students, Records, Attendances
 from encryption import oauth2_scheme, authenticate_user, create_access_token, User, get_password_hash
 from middleware import get_user_by_token
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 # AI related imports
 import cv2
 from fastapi import Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from deepface import DeepFace
 import numpy as np
 import os
@@ -69,7 +70,6 @@ app.add_middleware(
 
 
 app.mount("/images", StaticFiles(directory="storage/images"), name="images")
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create Database, and get the session
@@ -234,13 +234,21 @@ async def view_class(class_id: int, db: Session = Depends(get_session)):
 # delete classes
 @app.delete("/classes/delete/{class_id}")
 async def delete_class(class_id: int, db: Session = Depends(get_session)):
+    IMAGE_DIRECTORY = "storage/images"
     # Fetch the class by ID
     target_class = db.query(Classes).filter(Classes.id == class_id).first()
-    print(target_class)
     if not target_class:
         raise HTTPException(status_code=404, detail="Class not found")
 
-    # Optional: delete students associated with this class
+    # Fetch and delete student images
+    students = db.query(Students).filter(Students.class_id == class_id).all()
+    for student in students:
+        if student.Image_URI:  # Make sure your Student model has this attribute
+            image_path = os.path.join(IMAGE_DIRECTORY, student.Image_URI)
+            if os.path.exists(image_path):
+                os.remove(image_path)
+
+    # Delete student records
     db.query(Students).filter(Students.class_id == class_id).delete()
 
     # Delete the class
@@ -248,7 +256,6 @@ async def delete_class(class_id: int, db: Session = Depends(get_session)):
     db.commit()
 
     return {"status": "success", "message": f"Class with ID {class_id} has been deleted"}
-
 
 # edit class name
 @app.put("/classes/edit/{class_id}")
@@ -282,48 +289,29 @@ def edit_class(class_info: ClassesScheme, class_id: int, db: Session = Depends(g
     }
 
 # get students
+app_host = "http://127.0.0.1:8000"  # or use environment variable/config
+
 @app.get("/students/all")
 def get_all_students(db: Session = Depends(get_session)):
-    return db.query(Students).all()
+    students = db.query(Students).all()
+    results = []
 
+    for student in students:
+        print(f'student image uri: {student.Image_URI}')
+        results.append({
+            "id": student.id,
+            "name": student.name,
+            "class_id": student.class_id,
+            "college": student.college,
+            "department": student.department,
+            "year": student.year,
+            "group": student.group,
+            "image_uri": f"{app_host}/images/{student.Image_URI}" if student.Image_URI else None
+        })
+
+    return JSONResponse(content=results)
 
 # create students
-@app.post("/students/add/multiple")
-def add_student(student_info: list[StudentScheme], db: Session = Depends(get_session), class_id: int = None):
-    print(f"Here is what you sent: {student_info}")
-    if len(student_info) > 80:
-        raise HTTPException(status_code=400, detail="Too many students")
-    else:
-        for student in student_info:
-            path = add_image_to_fs(student.img)
-            new_student = Students(class_id=class_id, image_url=path, name=student.name,department=student.department,college=student.college,year=student.year)
-            db.add(new_student)
-            db.commit()
-            db.refresh(new_student)
-            print(f"Student: {new_student.username} created successfully")
-        return RedirectResponse(url="/classes/{}".format(class_id))
-
-@app.post("/students/add/single")
-def add_student(student_info: StudentScheme, db: Session = Depends(get_session), class_id: int = None):
-    print(f"Here is what you sent: {student_info}")
-    if not student_info:
-        raise HTTPException(status_code=400, detail="No Info Sent")
-    else:
-        path = student_info.img
-        print(f"image is: {student_info.img}")
-        if not student_info.img:
-            path = "storage/images/photo_2023-12-12_17-49-56.jpg"
-        # else:
-        #     path = add_image_to_fs(student_info.img)
-        new_student = Students( class_id=class_id, Image_URI=path, name=student_info.name,department=student_info.department,
-                                college=student_info.college,year=student_info.year, group=student_info.group)
-        db.add(new_student)
-        db.commit()
-        db.refresh(new_student)
-        print(f"Student: {new_student.name} created successfully")
-        return RedirectResponse(url="/classes/{}".format(class_id))
-
-
 import uuid
 from fastapi import Form, File, UploadFile, Depends
 from sqlalchemy.orm import Session
@@ -340,7 +328,7 @@ async def upload_student(
     db: Session = Depends(get_session)
 ):
     print(f"Received student: {name}")
-    image_path = "storage/images/default.jpg"
+    image_path = "storage/images/default.svg"
 
     if image:
         try:
@@ -377,11 +365,11 @@ async def upload_student(
             face_path = os.path.join("storage/images", filename)
             cv2.imwrite(face_path, face_rgb)
 
-            image_path = face_path
+            image_path = filename
 
         except Exception as e:
             print(f"⚠️ Face extraction failed: {e}")
-            image_path = "storage/images/default.jpg"
+            image_path = "storage/images/default.svg"
 
     # Step 5: Save to DB
     new_student = Students(
@@ -552,3 +540,110 @@ async def recognize_students(
     }
 
     return results
+
+@app.get("/records/all")
+def get_all_records(db: Session = Depends(get_session)):
+    records = db.query(Records).join(Attendances, Records.id == Attendances.record_id).all()
+
+    return records
+class AttendanceStudents(BaseModel):
+    student_id: int
+    isPresent: bool
+    hours: float
+
+class CreateRecordPayload(BaseModel):
+    class_id: int
+    student_list: List[AttendanceStudents]
+
+@app.post("/records/create")
+def create_record(
+    token: Annotated[str, Depends(oauth2_scheme)],
+    payload: CreateRecordPayload = Body(...),
+    db: Session = Depends(get_session)
+):
+    try:
+        user = get_user_by_token(token, session=db)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+        # Create the attendance record
+        new_record = Records(class_id=payload.class_id, user_id=user.id)
+        db.add(new_record)
+        db.commit()
+        db.refresh(new_record)
+
+        # Create all attendance entries
+        attendances = [
+            Attendances(
+                isPresent=entry.isPresent,
+                student_id=entry.student_id,
+                record_id=new_record.id
+            )
+            for entry in payload.student_list
+        ]
+        db.add_all(attendances)
+        db.commit()
+
+        return {
+            "message": "Attendance record created successfully",
+            "record_id": new_record.id,
+            "attendances": [a.student_id for a in attendances]
+        }
+
+    except SQLAlchemyError as e:
+        db.rollback()
+        print("Database error:", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database error while creating record"
+        )
+
+    except Exception as e:
+        db.rollback()
+        print("Unexpected error:", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred"
+        )
+
+
+
+@app.get("/records/summary")
+def get_records_summary(db: Session = Depends(get_session)):
+    records = db.query(Records).options(
+        joinedload(Records.class_),
+        joinedload(Records.attendances).joinedload(Attendances.student)
+    ).all()
+
+    summary = []
+    # print(f'These are the records: {records}')
+    for record in records:
+        total_students = len(record.attendances)
+        print(f'class data: {record.class_}')
+        attended_students = sum(1 for att in record.attendances if att.isPresent)
+        attendance_percentage = (
+            round((attended_students / total_students) * 100, 2)
+            if total_students > 0 else 0
+        )
+
+        summary.append({
+            "record_id": record.id,
+            "date_created": record.date_created,
+            "class": record.class_,
+            "class_id": record.class_id,
+            "user_id": record.user_id,
+            "total_students": total_students,
+            "attended_students": attended_students,
+            "attendance_percentage": attendance_percentage,
+            "students": [
+                {
+                    "id": att.student.id,
+                    "name": att.student.name,
+                    "isPresent": att.isPresent,
+                    "hours": att.hours
+                }
+                for att in record.attendances
+            ]
+        })
+
+    return summary

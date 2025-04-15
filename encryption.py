@@ -46,6 +46,7 @@ def authenticate_user(username: str, password: str, session: Session):
     # TODO -> find a way to get the user
     statement = select(Users).where(Users.username == username)
     users = session.execute(statement)
+    print(f'Got Users: {users}')
     user = users.first()[0]
 
     print(f"user found: {user}")
