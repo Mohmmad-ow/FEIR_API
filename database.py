@@ -24,8 +24,8 @@ class Classes(SQLModel, table=True):
     year: Optional[int] = Field(default=1, nullable=False)
 
     # Relationships
-    students: List["Students"] = Relationship(back_populates="class_")
-    records: List["Records"] = Relationship(back_populates="class_")
+    students: List["Students"] = Relationship(back_populates="class_", cascade_delete=True)
+    records: List["Records"] = Relationship(back_populates="class_", cascade_delete=True)
 
 
 class Students(SQLModel, table=True):
@@ -42,7 +42,7 @@ class Students(SQLModel, table=True):
 
     # Relationships
     class_: Optional[Classes] = Relationship(back_populates="students")
-    attendances: List["Attendances"] = Relationship(back_populates="student")
+    attendances: List["Attendances"] = Relationship(back_populates="student", cascade_delete=True)
 
 
 class Records(SQLModel, table=True):
@@ -56,7 +56,7 @@ class Records(SQLModel, table=True):
     # Relationships
     class_: Optional[Classes] = Relationship(back_populates="records")
     user: Optional[Users] = Relationship(back_populates="records")
-    attendances: List["Attendances"] = Relationship(back_populates="record")
+    attendances: List["Attendances"] = Relationship(back_populates="record", cascade_delete=True)
 
 
 class Attendances(SQLModel, table=True):
@@ -71,6 +71,9 @@ class Attendances(SQLModel, table=True):
     # Relationships
     student: Optional[Students] = Relationship(back_populates="attendances")
     record: Optional[Records] = Relationship(back_populates="attendances")
+
+
+
 
 
 

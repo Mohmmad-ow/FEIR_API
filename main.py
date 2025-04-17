@@ -37,7 +37,7 @@ class ClassesScheme(BaseModel):
 
 class StudentScheme(BaseModel):
     name: str
-    img: str | None = "storage/images/photo_2023-12-12_17-49-56.jpg"
+    img: str | None = "default.svg"
     group: str
     college: str = "information technology"
     department: str = "software engineering"
@@ -616,10 +616,9 @@ def get_records_summary(db: Session = Depends(get_session)):
     ).all()
 
     summary = []
-    # print(f'These are the records: {records}')
     for record in records:
         total_students = len(record.attendances)
-        print(f'class data: {record.class_}')
+
         attended_students = sum(1 for att in record.attendances if att.isPresent)
         attendance_percentage = (
             round((attended_students / total_students) * 100, 2)
