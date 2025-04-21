@@ -15,7 +15,22 @@ class Users(SQLModel, table=True):
     # Relationships
     records: List["Records"] = Relationship(back_populates="user")
 
+from sqlmodel import SQLModel, Field, Relationship
+from typing import List, Optional
 
+class StudentClassLink(SQLModel, table=True):
+    student_id: Optional[int] = Field(
+        default=None, foreign_key="students.id", primary_key=True
+    )
+    class_id: Optional[int] = Field(
+        default=None, foreign_key="classes.id", primary_key=True
+    )
+    group_name: Optional[str] = Field(default=None, alias="group", nullable=True)
+
+    student: Optional["Students"] = Relationship(back_populates="student_links")
+    class_: Optional["Classes"] = Relationship(back_populates="class_links")
+
+# Updated Classes model
 class Classes(SQLModel, table=True):
     id: Optional[int] = Field(unique=True, primary_key=True, nullable=False)
     name: str = Field(nullable=False)
@@ -23,27 +38,31 @@ class Classes(SQLModel, table=True):
     department: Optional[str] = Field(default="Software", nullable=True)
     year: Optional[int] = Field(default=1, nullable=False)
 
-    # Relationships
-    students: List["Students"] = Relationship(back_populates="class_", cascade_delete=True)
+    students: List["Students"] = Relationship(
+        back_populates="classes",
+        link_model=StudentClassLink,
+    )
+
+    # Add this explicit link
+    class_links: List[StudentClassLink] = Relationship(back_populates="class_", cascade_delete=True)
+
     records: List["Records"] = Relationship(back_populates="class_", cascade_delete=True)
 
-
+# Updated Students model
 class Students(SQLModel, table=True):
     id: Optional[int] = Field(unique=True, primary_key=True, nullable=False)
     name: str = Field(nullable=False)
-    group: Optional[str] = Field(default="A", nullable=False)
-    college: Optional[str] = Field(default="Information Technology", nullable=True)
-    department: Optional[str] = Field(default="Software", nullable=True)
-    year: Optional[int] = Field(default=1, nullable=False)
     Image_URI: str = Field(nullable=False)
 
-    # Foreign Key
-    class_id: Optional[int] = Field(foreign_key="classes.id", nullable=False)
+    classes: List["Classes"] = Relationship(
+        back_populates="students",
+        link_model=StudentClassLink,
+    )
 
-    # Relationships
-    class_: Optional[Classes] = Relationship(back_populates="students")
+    # Add this explicit link
+    student_links: List[StudentClassLink] = Relationship(back_populates="student", cascade_delete=True)
+
     attendances: List["Attendances"] = Relationship(back_populates="student", cascade_delete=True)
-
 
 class Records(SQLModel, table=True):
     id: Optional[int] = Field(unique=True, primary_key=True, nullable=False)
